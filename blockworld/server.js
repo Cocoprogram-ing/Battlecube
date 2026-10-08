@@ -16,6 +16,32 @@ const send = (ws, o) => ws.readyState === 1 && ws.send(JSON.stringify(o));
 const bcast = (w, o, except) => w.players.forEach(p => p !== except && send(p, o));
 const pub = p => ({ id: p.id, name: p.name, p: p.p, r: p.r });
 const clean = n => String(n || '').replace(/[<>\u0000-\u001f]/g, '').trim().slice(0, 16);
+const spawn = () => [10 + Math.random() * 4 - 2, 1.01, 10 + Math.random() * 4 - 2];
+const vec = v => Array.isArray(v) && v.length === 3 && v.every(Number.isFinite);
+
+// Walk a ray from the shooter's eye; first block stops it, first player is hit.
+function trace(w, s, d, range) {
+  const L = Math.hypot(...d) || 1, o = [s.p[0], s.p[1] + 1.62, s.p[2]], u = d.map(a => a / L);
+  let t = 0;
+  for (; t <= range; t += 0.1) {
+    const x = o[0] + u[0] * t, y = o[1] + u[1] * t, z = o[2] + u[2] * t;
+    if (w.blocks.has(key(Math.floor(x), Math.floor(y), Math.floor(z)))) break;
+    for (const p of w.players.values())
+      if (p !== s && !p.dead && Math.abs(x - p.p[0]) < 0.4 && Math.abs(z - p.p[2]) < 0.4 && y > p.p[1] && y < p.p[1] + 1.9)
+        return { end: [x, y, z], p };
+  }
+  return { end: [o[0] + u[0] * t, o[1] + u[1] * t, o[2] + u[2] * t] };
+}
+function hurt(w, v, dmg, by) {
+  if (v.dead) return;
+  v.hp = Math.max(0, v.hp - dmg);
+  send(v, { t: 'hp', hp: v.hp });
+  if (!v.hp) {
+    v.dead = true;
+    bcast(w, { t: 'pleave', id: v.id }, v);
+    bcast(w, { t: 'chat', sys: true, text: v === by ? v.name + ' died' : v.name + ' was killed by ' + by.name });
+  }
+}
 const int = (v, a, b) => Number.isInteger(v) && v >= a && v <= b;
 
 function newWorld() {
@@ -46,12 +72,12 @@ wss.on('connection', ws => {
       }
       ws.world = world; ws.id = nextId++;
       ws.name = clean(m.name) || 'Player' + ws.id;
-      ws.p = [10 + Math.random() * 4 - 2, 1.01, 10 + Math.random() * 4 - 2]; ws.r = [0, 0];
+      ws.p = spawn(); ws.r = [0, 0]; ws.hp = 100; ws.dead = false;
       if (m.t === 'create') world.host = ws.id;
       send(ws, {
         t: 'joined', id: ws.id, host: world.host === ws.id, code: world.open ? world.code : null, spawn: ws.p,
         blocks: [...world.blocks].map(([k, c]) => k.split(',').map(Number).concat(c)),
-        players: [...world.players.values()].map(pub),
+        players: [...world.players.values()].filter(p => !p.dead).map(pub),
       });
       world.players.set(ws.id, ws);
       bcast(world, { t: 'pjoin', p: pub(ws) }, ws);
@@ -59,6 +85,16 @@ wss.on('connection', ws => {
       return;
     }
     if (!w) return;
+    const now = Date.now();
+    const cd = (k, ms) => (now - (ws[k] || 0) < ms ? false : (ws[k] = now, true));
+    if (ws.dead && m.t !== 'chat') {
+      if (m.t === 'respawn') {
+        ws.dead = false; ws.hp = 100; ws.p = spawn(); ws.r = [0, 0];
+        send(ws, { t: 'respawned', spawn: ws.p });
+        bcast(w, { t: 'pjoin', p: pub(ws) }, ws);
+      }
+      return;
+    }
 
     if (m.t === 'open' && w.host === ws.id) { w.open = true; bcast(w, { t: 'opened', code: w.code }); }
     else if (m.t === 'move' && Array.isArray(m.p) && Array.isArray(m.r) && [...m.p, ...m.r].every(Number.isFinite)) {
@@ -67,6 +103,24 @@ wss.on('connection', ws => {
       const k = key(m.x, m.y, m.z);
       if (m.c < 0) w.blocks.delete(k); else w.blocks.set(k, m.c);
       bcast(w, { t: 'block', x: m.x, y: m.y, z: m.z, c: m.c });
+    } else if ((m.t === 'shoot' || m.t === 'stab') && vec(m.d)) {
+      const gun = m.t === 'shoot';
+      if (!cd(m.t, gun ? 200 : 400)) return;
+      const r = trace(w, ws, m.d, gun ? 60 : 2.6);
+      if (gun) bcast(w, { t: 'shot', o: [ws.p[0], ws.p[1] + 1.62, ws.p[2]], e: r.end });
+      if (r.p) hurt(w, r.p, gun ? 20 : 40, ws);
+    } else if (m.t === 'throw' && vec(m.d)) {
+      if (!cd('throw', 1000)) return;
+      const L = Math.hypot(...m.d) || 1, v = m.d.map(a => a / L * 16); v[1] += 3;
+      (ws.nades = ws.nades || []).push(now);
+      bcast(w, { t: 'throw', id: ws.id, p: [ws.p[0], ws.p[1] + 1.6, ws.p[2]], v });
+    } else if (m.t === 'boom' && vec(m.p) && ws.nades && ws.nades.length && now - ws.nades[0] > 1500) {
+      ws.nades.shift();
+      bcast(w, { t: 'boom', p: m.p });
+      w.players.forEach(p => {
+        const d = Math.hypot(p.p[0] - m.p[0], p.p[1] + 1 - m.p[1], p.p[2] - m.p[2]);
+        if (d < 5) hurt(w, p, Math.ceil(80 * (1 - d / 5)), ws);
+      });
     } else if (m.t === 'chat') {
       const text = String(m.text || '').replace(/[\u0000-\u001f]/g, '').trim().slice(0, 200);
       if (text) bcast(w, { t: 'chat', name: ws.name, text });

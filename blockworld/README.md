@@ -4,7 +4,7 @@ Multiplayer 3D block game: Three.js client, Node.js + WebSocket (`ws`) server.
 
 **Play:** create a world → press `Esc` → **Open world** → share the 5-letter code. Friends enter their name + code and click **Join world**.
 
-Controls: WASD, Space (jump), left click break, right click place, `1`–`0` / wheel hotbar, `T` chat, `Esc` menu.
+Controls: WASD, Space (jump), `E` switch building/battle hotbar, left click break or attack, right click place, `1`–`0` / wheel select, `T` chat, `Esc` menu. Battle hotbar: grenade, gun, knife.
 
 ## Run locally
     npm install
